@@ -2,3 +2,6 @@ Revision history for File-Find-Node
 
 0.01    2007/12/19 17:00
         First version
+
+0.02    2008/03/14 15:00
+        Changed test script t/01FFN.t to use mkfifo instead of mknod

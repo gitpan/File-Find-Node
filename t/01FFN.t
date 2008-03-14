@@ -19,7 +19,7 @@ ok(system(<<'E-O-F') == 0, "build test directory");
     mkdir testdir testdir/subdir testdir/empty
     echo testjunk1     > testdir/regfile
     echo moreteststuff > testdir/subdir/regfile2
-    mknod testdir/fifo p
+    mkfifo testdir/fifo
     ln -s regfile testdir/link
     ln -s nothing testdir/badlink
     ln -s .. testdir/subdir/cycle1
@@ -88,7 +88,7 @@ $f->process(sub {
     if ($path eq "testdir/badlink") {
         ok($f->type eq "l", "test follow() method handles broken link");
     }
-	$f->stop if $count > 20  # avoid infinite cycling
+    $f->stop if $count > 20  # avoid infinite cycling
 });
 $f->follow->find;
 
@@ -217,7 +217,7 @@ $count = 0;
 $f = File::Find::Node->new("testdir");
 $f->process(sub {
     my $f = shift;
-	$f->stop if ++$count == 5;
+    $f->stop if ++$count == 5;
 });
 $f->find;
 ok($count == 5, "test stop() method");
