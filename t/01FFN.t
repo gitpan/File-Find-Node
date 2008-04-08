@@ -1,6 +1,6 @@
 #! perl -T
 
-use Test::More tests => 65;
+use Test::More tests => 74;
 
 BEGIN {
     use_ok( 'File::Find::Node' );
@@ -14,7 +14,7 @@ diag( "Testing File::Find::Node $File::Find::Node::VERSION, Perl $], $^X" );
 ok(system(<<'E-O-F') == 0, "build test directory");
     set -e
     umask 022
-    PATH=/bin:/usr/bin
+    PATH=/bin:/usr/bin:/sbin:/usr/sbin
     test -d testdir && rm -rf testdir
     mkdir testdir testdir/subdir testdir/empty
     echo testjunk1     > testdir/regfile
@@ -250,6 +250,28 @@ $f->post_process(sub {
     }
 });
 $f->find;
+
+# Test fork() method
+
+$count = 0;
+my $pid = $$;
+$f = File::Find::Node->new("testdir");
+$f->process(sub {
+    my $f = shift;
+    my $path = $f->path;
+    $count++;
+    $f->fork(2) if $path eq "testdir/subdir";
+    if ($path !~ m{^testdir/subdir/.+$}) {
+        ok($$ == $pid, "test fork() main process visits $path");
+    }
+});
+$f->post_process(sub {
+    my $f = shift;
+    return if $f->path ne "testdir";
+    ok(wait > 0, "test fork() reaped a sub process");
+});
+$f->find;
+ok($count == 7, "test fork() main process visited 7 nodes (got $count)");
 
 # Test error_process() method
 

@@ -5,7 +5,7 @@ use strict;
 use warnings;
 use Carp;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 #
 # constructor
@@ -25,6 +25,7 @@ use constant STAT     => 10;
 use constant ARG      => 11;
 use constant USER     => 12;
 use constant GROUP    => 13;
+use constant MAXFORK  => 14;
 
 sub new {
     my ($class, $path) = @_;
@@ -45,7 +46,8 @@ sub new {
         undef,  # STAT
         undef,  # ARG
         {},     # USER  cache for getpwuid()
-        {}      # GROUP cache for getgrgid()
+        {},     # GROUP cache for getgrgid()
+        0       # MAXFORK
     ];
     $self->[NAME] =~ s{.*/}{};
     bless($self);
@@ -63,7 +65,7 @@ sub _error {
         $self->[ERRPROC]->($self, $what);
     }
     else {
-        my $path = $self->path;
+        my $path = $self->[PATH];
         carp(__PACKAGE__, " - $what($path) - $!");
     }
 }
@@ -73,7 +75,7 @@ sub _error {
 sub _cycle {
     my $self = shift;
     my ($inum, $dev) = ($self->inum, $self->dev);
-    for (my $p = $self->parent; $p; $p = $p->parent) {
+    for (my $p = $self->[PARENT]; $p; $p = $p->[PARENT]) {
         return 1 if $dev == $p->dev && $inum == $p->inum;
     }
     0;
@@ -120,7 +122,7 @@ sub prune {
 
 sub stop {
     my $self = shift;
-    for (my $p = $self; $p; $p = $p->parent) {
+    for (my $p = $self; $p; $p = $p->[PARENT]) {
         $p->[PRUNE] = 1;
     }
     $self;
@@ -129,6 +131,12 @@ sub stop {
 sub follow {
     my $self = shift;
     $self->[FOLLOW] = (@_ == 0 || shift);
+    $self;
+}
+
+sub fork {
+    my $self = shift;
+    $self->[MAXFORK] = ($self->[LEVEL] > 0 && @_ > 0) ? shift : 0;
     $self;
 }
 
@@ -255,7 +263,7 @@ sub empty {
     }
     elsif ($ftype eq "d") {
         my $dirh;
-        if (!opendir($dirh, $self->path)) {
+        if (!opendir($dirh, $self->[PATH])) {
             $self->_error("opendir");
             return 0;
         }
@@ -276,7 +284,7 @@ sub empty {
 
 sub refresh {
     my $self = shift;
-    my $path = $self->path;
+    my $path = $self->[PATH];
     my @stat;
     if ($self->[FOLLOW]) {
         @stat = CORE::stat($path) or @stat = CORE::lstat($path);
@@ -298,12 +306,12 @@ sub refresh {
 sub find {
     no warnings "recursion";
     my $self = shift;
-    $self->refresh->[STAT] or return;  # loads stat info
+    $self->refresh->[STAT] or return 0;  # loads stat info
 
     # avoid cycles
 
     my $ftype = $self->type;
-    return if $ftype eq "d" && $self->[FOLLOW] && $self->_cycle;
+    return 0 if $ftype eq "d" && $self->[FOLLOW] && $self->_cycle;
 
     # call process callback
 
@@ -311,22 +319,46 @@ sub find {
         $self->[PROCESS]->($self);
     }
 
-    # traverse directory if not pruned
+    # skip directory if pruned
 
-    return if $ftype ne "d" || $self->[PRUNE];
-    my $path = $self->path;
+    return 0 if $ftype ne "d" || $self->[PRUNE];
+
+    # fork sub process if requested by $f->fork
+
+    my $forked = 0;
+    if ($self->[LEVEL] > 0 && $self->[MAXFORK] > 1) {
+        my $pid = CORE::fork;
+        if (!defined($pid)) {
+            $self->_error("fork");
+        }
+        elsif ($pid == 0) {   # sub process continues
+            $forked = 1;
+        }
+        else {
+            return $self->[MAXFORK]  # parent process returns
+        }
+    }
+
+    # read and filter the directory entries
+
+    my $path = $self->[PATH];
     my $dirh;
     if (!opendir($dirh, $path)) {
         $self->_error("opendir");
-        return;
+        exit(0) if $forked;
+        return 0;
     }
     my @dirent = $self->[FILTER] ?
         $self->[FILTER]->(readdir($dirh)) : readdir($dirh);
     closedir($dirh);
+
+    # visit the directory entries
+
+    my $maxfork = my $numfork = 0;
     foreach my $name (@dirent) {
         next if $name eq "." || $name eq "..";
 
-        # build child object and traverse it
+        # build child object
 
         my $child;
         @$child = @$self;
@@ -336,16 +368,40 @@ sub find {
         $child->[LEVEL]++;
         $child->[STAT] = undef;
         $child->[ARG]  = undef;
+        $child->[MAXFORK] = 0;
         bless($child);
-        $child->find;
-        return if $self->[PRUNE];
+
+        # wait for sub processes to exit
+
+        while ($numfork > 0 && $numfork >= $maxfork) {
+            wait;
+            $numfork--;
+        }
+
+        # visit the child with a recursive call
+
+        my $forkinfo = $child->find;
+
+        if ($forkinfo > 1) {     # a sub process was forked
+            $numfork++;
+            $maxfork = $forkinfo;
+        }
+        last if $self->[PRUNE];  # may have been pruned by child
     }
 
     # call post_process callback
 
-    if ($self->[POSTPROC]) {
+    if (!$self->[PRUNE] && $self->[POSTPROC]) {
         $self->[POSTPROC]->($self);
     }
+
+    # wait for any remaining sub processes
+
+    while ($numfork-- > 0) {
+        wait;
+    }
+    exit(0) if $forked;
+    return 0;
 }
 1;
 
@@ -353,9 +409,7 @@ __END__
 
 =head1 NAME
 
-File::Find::Node -
-Recursively traverses a directory tree and processes each item
-using callback functions supplied by the user.
+File::Find::Node - Object oriented directory tree traverser
 
 =head1 SYNOPSIS
 
@@ -422,7 +476,7 @@ The function is passed the File::Find::Node object for the directory.
 =item $f->filter(\&func)
 
 Takes a reference to a callback function that is called to filter
-a list of file names.  Before descending into a directory,
+a list of file names.  When descending into a directory,
 the function is passed the list of file names obtained with readdir()
 and the function returns a new list.  The filter function can be
 used to sort and/or remove file names.
@@ -439,6 +493,7 @@ a string indicating the cause:
 
   "stat"     stat() or lstat() failed
   "opendir"  opendir() failed
+  "fork"     fork() failed
 
 An error does not terminate the traversal, so the callback
 function may need to call $f->stop or exit() or die().
@@ -549,6 +604,69 @@ $f->post_process function.
 Prunes everything on the $f->parent chain, which causes $f->find
 to return.
 
+=item $f->fork($maxfork)
+
+$f->fork sets a flag in the object and returns the object.
+The flag causes $f->find to traverse the object using a
+concurrent sub process.  The argument
+$maxfork limits the number of concurrent processes that
+$f->find will create in the object's parent directory.
+When the limit is reached, $f->find waits for a sub process
+to exit before starting another.  Before leaving the
+parent directory $f->find waits for any remaining sub
+processes to exit.
+$f->fork has no effect if
+1) the object is not a directory, or
+2) the object is the top level object, or
+3) $maxfork is less than two, or
+4) $f->fork is called from the $f->post_process function.
+
+You can use $f->fork to traverse directories concurrently.
+For example, suppose you have home directories stored
+under directories named /users/a /users/b ... /users/z .
+The following traverses these directories using up to ten
+concurrent processes:
+
+  sub proc {
+      my $f = shift;
+      $f->fork(10) if $f->level == 1;
+
+      # more code here
+  }
+  my $f = File::Find::Node->new("/users");
+  $f->process(\&proc)->find;
+
+A sub process itself can create sub processes.
+Suppose you have directories named
+/users/a/aa /users/a/ab ... /users/a/az ...  /users/z/zz .
+The following creates up to five concurrent processes at level one,
+each of which creates up to four concurrent processes at level two.
+
+  sub proc {
+      my $f = shift;
+      $f->fork(5) if $f->level == 1;
+      $f->fork(4) if $f->level == 2;
+
+      # more code here
+  }
+  my $f = File::Find::Node->new("/users");
+  $f->process(\&proc)->find;
+
+Sub processes have several limitations.
+A sub process is created using the Unix/perl fork() call so the
+sub process receives a private copy of the parent process's data.
+Modifications to perl variables and other data are confined
+to the sub process and do not affect the parent process or any
+other processes.  Calling exit() or die() or $f->stop only
+affects the current process.  Other processes continue to run.
+Open filehandles are duplicated when a sub process is created.
+In particular, STDOUT and STDERR receive output interspersed
+from all processes.
+
+Creating and destroying processes incurs significant system overhead.
+Using numerous sub processes to traverse small directory trees is
+counterproductive.
+
 =item $f->empty
 
 Returns true if the item is an empty directory or if the item is a
@@ -598,6 +716,21 @@ Returns a lower case letter indicating the type of the item:
 =item $f->perm
 
 Returns the permission bits ($f->mode masked with 07777).
+Here are the Unix permission bit definitions in octal:
+
+            user  group other
+          +------------------
+  read    | 0400   040    04
+  write   | 0200   020    02
+  execute | 0100   010    01
+
+  set user:   04000
+  set group:  02000
+  sticky:     01000
+
+For example, to see if write is enabled for group or other:
+
+  if (($f->perm & 022) != 0) { ... }
 
 =item $f->links
 
@@ -790,7 +923,7 @@ Stephen C. Losen, University of Virginia, scl@virginia.edu
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2007 by Stephen C. Losen
+Copyright (C) 2008 by Stephen C. Losen
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.6 or,

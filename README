@@ -53,7 +53,9 @@ o store arbitrary data in the object (flags, counters, totals or other
 
 o skip parts of the traversal (prune a directory);
 
-o terminate the traversal.
+o terminate the traversal;
+
+o traverse a directory tree with a concurrent sub process;
 
 o refresh saved stat() information.
 
@@ -76,6 +78,8 @@ o Provides access to the parent directory object.
   Decisions can be based on the current object and its parent directory.
 
 o Can easily prune directories or stop traversal entirely.
+
+o Can traverse two or more directory trees concurrently.
 
 o Space and time efficient.
 
@@ -116,7 +120,7 @@ You can also look for information at:
 
 COPYRIGHT AND LICENSE
 
-Copyright (C) 2007 Stephen C. Losen
+Copyright (C) 2008 Stephen C. Losen
 
 This program is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.
